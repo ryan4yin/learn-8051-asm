@@ -323,12 +323,16 @@ __start__stack:
 	.area GSINIT  (CODE)
 	.area GSFINAL (CODE)
 	.area CSEG    (CODE)
+; ......省略若干 sdcc 的模板汇编内容
 ;--------------------------------------------------------
 ; interrupt vector 
 ;--------------------------------------------------------
 	.area HOME    (CODE)
 __interrupt_vect:
-	ljmp	__sdcc_gsinit_startup
+	ljmp	__sdcc_gsinit_startup  ; 一条指令 2 字节
+	.ds 8                          ; 中间留空 8 字节
+	ljmp _interrupt_handler_t0     ; 这条指令从中断表的第 11 字节开始，地址为 0x0000b，即 t0 溢出中断的跳转地址
+
 ;--------------------------------------------------------
 ; global & static initialisations
 ;--------------------------------------------------------
@@ -344,23 +348,25 @@ __interrupt_vect:
 	.globl __mcs51_genRAMCLEAR
 	.area GSFINAL (CODE)
 	ljmp	__sdcc_program_startup
-; ......省略若干 sdcc 的模板汇编内容
 ;--------------------------------------------------------
 ; 自定义的全局变量
 ; 包括代码段 label 也需要使用这种伪指令定义
 ;--------------------------------------------------------
-	.globl _delay
-	.globl _main
-	.globl _display
+.globl _delay
+.globl _main
+.globl _display
+.globl _interrupt_handler_t0
 
-	.globl COUNT  ; 自增变量，每次 + 1
-	.globl LED3   ; 第三个数码管显示数值存放处
-	.globl LED4
-	
-	COUNT = 0x30
-	LED3 = 0x31
-	LED4 = 0x32
-	
+.globl COUNT  ; 自增变量，每次 + 1
+.globl T_COUNT  ; 用于定时的自增变量
+.globl LED3   ; 第三个数码管显示数值存放处
+.globl LED4
+
+COUNT = 0x30
+T_COUNT = 0x31
+LED3 = 0x32
+LED4 = 0x33
+
 ;--------------------------------------------------------
 ; Home
 ;--------------------------------------------------------
@@ -394,27 +400,45 @@ _main:
     ; 注意 #0x60 表示这个字面量数字，而如果去掉 # 则表示 RAM 对应地址存放的值
     mov sp, #0x60
 
-    mov 0x40, #0xff  ; 延时函数的参数
+    mov 0x40, #0x0  ; 延时函数的参数
     mov _P0, #0b11111111   ; P0 全置为高电平，即 P0 上的灯全灭
     mov _P2, #0b00000000   ; P2 全置为高电平，D1 - D4 四个数码管都没电压
 
     mov dptr, #_tab     ; 给 dptr 数据指针赋 #_tab 的地址
 	mov COUNT, #0x0     ; 清零
+	mov T_COUNT, #0x0     ; 清零
 	mov LED3,  #0x0     ; 清零
 	mov LED4,  #0x0     ; 清零
 
-_main_loop:
-	lcall _update
-	lcall _display
+	mov _TH0, #0x3c     ; 给 T0 赋值 0x3cb0，即 65535 - 50000，使其定时 50ms 后触发溢出中断
+	mov _TL0, #0xb0
 
+	mov TMOD, #0b00000001  ; C/T位设置为 0, M1M0设置位 0x01，即模式1，16 位定时
+	mov TCON, #0b0010000  ; TR0设置为1，即启动定时器0开始工作
+	setb ET0             ; IE中的ET0位设置为1，开定时器中断0
+	setb EA              ; IE中的EA位设置为1，开总中断
+
+_main_loop:
+	lcall _display
 	sjmp    _main_loop  ; 无限循环
 
-_update:
+
+_interrupt_handler_t0:
+	inc T_COUNT           ; 计数器 +1
+	mov a, T_COUNT
+	cjne a, #20, _continue_t0  ; 如果 T_COUNT 不为 20（50000 us * 20 刚好为 1 秒），就进入普通逻辑
+	mov T_COUNT, #0x0     ; T_COUNT 到 20 了，将它清零
+	lcall _inc_count  ; 显示器的秒数 + 1
+	_continue_t0:
+		mov _TH0, #0x3c   ; 给 T0 赋值 0x3cb0，即 65535 - 50000，使其定时 50ms 后触发溢出中断
+		mov _TL0, #0xb0
+		reti              ; 中断程序要使用 reti 返回
+_inc_count: 
 	inc COUNT           ; 计数器 +1
 	mov a, COUNT
-	cjne a, #100, _continue  ; 如果 COUNT 不为 100，就进入普通逻辑
+	cjne a, #100, _continue_inc  ; 如果 COUNT 不为 100，就进入普通逻辑
 	mov COUNT, #0x0     ; COUNT 到 100 了，将它清零
-	_continue:
+	_continue_inc:
 		mov a, COUNT
 		mov b, #10
 		div ab           ; （无符号除法）用 a 除以 b，结果存到 a 中，余数存到 b 中
@@ -422,7 +446,7 @@ _update:
 		mov LED4, b     ; 个位数用 LED4 显示
 
 		ret							
-	  
+
 _display:
 	mov a, LED3         ; 将 LED3 中的值 copy 到寄存器 a 中作为索引值
     movc a, @a+dptr     ; A 和 DPTR 中的数加一起作为地址，把此地址中的数据（1 byte）取出来再存到 A 中
@@ -440,8 +464,9 @@ _display:
 	clr _P2_3           ; 关掉 D4 电源
 
 	ret                 ; 跳转回调用方
+
 ;------------------------------------------------------------
-; 常量数据区，当前数据量 12
+; 常量数据区，当前数据量 10
 ;------------------------------------------------------------
 _tab:
 	; 由高位到低位，8 个 bit 分别对应 P0.7 到 P0.0 八个引脚
@@ -458,22 +483,21 @@ _tab:
 	.db #0b11111000 ; defg 灭，显示 7
 	.db #0b10000000 ; 全部亮，显示 8
 	.db #0b10010000 ; 仅 e 灭，显示 9
-	.db #0b11111111 ; 全部灭，不显示
 
 ;------------------------------------------------------------
 ; function 'delay'
 ; 此处延时的工作原理：让单片机重复执行非常多次 djnz 指令，实现延时效果
 ; 时长计算方法：
 ;  1. mov 指令耗时一个机器周期，但是它跑得比较少可以直接忽略
-;  2. djnz 指令耗时两个机器周期，它主要的执行次数为 0xff * 0xff 次
+;  2. djnz 指令耗时两个机器周期，它主要的执行次数为 r0 * 0xff 次
 ;  3. 因为使用的是 12M 的晶振，经过 51 单片机内部 12 分频
 ;（即脉冲变宽，频率为晶振频率的十二分之一）后为 1M，那么一个机器周期的时间是 1 微秒
-; 这样就能得出每次延时时间略大于 2 * 0xff * 0xff 微秒，约为 0.13 秒
+; 这样就能得出当 r0 为 0xff 时，每次延时时间略大于 2 * 0xff * 0xff 微秒，约为 0.13 秒
 ;------------------------------------------------------------
 _delay:
-	mov r0, 0x40       ; 从 RAM 0x40 位置取值，赋到 r0 上
+	mov r0, #0x20       ; 将 0x20 赋到 r0 上
 	_d2:
-		mov	r1, 0x40   ; 赋值为 #0xff 也就是 255
+		mov	r1, #0xff   ; 赋值为 #0xff 也就是 255
 	_d1:
 		djnz r1, _d1    ; R1 减 1 不等于 0 跳到 _d1 处
 		djnz r0, _d2    ; R0 减 1 不等于 0 跳到 _d2 处
