@@ -8,8 +8,6 @@
 ;--------------------------------------------------------
 ; Public variables in this module
 ;--------------------------------------------------------
-	.globl _delay
-	.globl _main
 	.globl _CY
 	.globl _AC
 	.globl _F0
@@ -346,6 +344,23 @@ __interrupt_vect:
 	.globl __mcs51_genRAMCLEAR
 	.area GSFINAL (CODE)
 	ljmp	__sdcc_program_startup
+; ......省略若干 sdcc 的模板汇编内容
+;--------------------------------------------------------
+; 自定义的全局变量
+; 包括代码段 label 也需要使用这种伪指令定义
+;--------------------------------------------------------
+	.globl _delay
+	.globl _main
+	.globl _display
+
+	.globl COUNT  ; 自增变量，每次 + 1
+	.globl LED3   ; 第三个数码管显示数值存放处
+	.globl LED4
+	
+	COUNT = 0x30
+	LED3 = 0x31
+	LED4 = 0x32
+	
 ;--------------------------------------------------------
 ; Home
 ;--------------------------------------------------------
@@ -358,7 +373,6 @@ __sdcc_program_startup:
 ; code
 ;--------------------------------------------------------
 	.area CSEG    (CODE)
-; ......省略若干 sdcc 的模板汇编内容
 ;--------------------------------------------------------
 ;	 function main
 ;--------------------------------------------------------
@@ -380,32 +394,71 @@ _main:
     ; 注意 #0x60 表示这个字面量数字，而如果去掉 # 则表示 RAM 对应地址存放的值
     mov sp, #0x60
 
-    mov 0x40, #0x0f  ; 延时函数的参数
+    mov 0x40, #0xff  ; 延时函数的参数
     mov _P0, #0b11111111   ; P0 全置为高电平，即 P0 上的灯全灭
     mov _P2, #0b00000000   ; P2 全置为高电平，D1 - D4 四个数码管都没电压
-    mov r2, #0x00  ; 使用寄存器 r2 作为临时变量存储处。这里不能用 a 了，因为后面做算术操作必须用到 a
+
+    mov dptr, #_tab     ; 给 dptr 数据指针赋 #_tab 的地址
+	mov COUNT, #0x0     ; 清零
+	mov LED3,  #0x0     ; 清零
+	mov LED4,  #0x0     ; 清零
+
 _main_loop:
-    mov _P0, #0b10100100 ; 仅 cf 灭，显示 2
-	setb _P2_0           ; 给 D1 供电
-	lcall   _delay
-	clr _P2_0          ; 关掉 D1 电源
+	lcall _update
+	lcall _display
 
-    mov _P0, #0b11000000 ; dp 与 g 灭，显示 0
-	setb _P2_1           ; 给 D1 供电
-	lcall   _delay
-	clr _P2_1          ; 关掉 D1 电源
+	sjmp    _main_loop  ; 无限循环
 
-    mov _P0, #0b10100100 ; 仅 cf 灭，显示 2
-	setb _P2_2           ; 给 D1 供电
-	lcall   _delay
-	clr _P2_2          ; 关掉 D1 电源
+_update:
+	inc COUNT           ; 计数器 +1
+	mov a, COUNT
+	cjne a, #100, _continue  ; 如果 COUNT 不为 100，就进入普通逻辑
+	mov COUNT, #0x0     ; COUNT 到 100 了，将它清零
+	_continue:
+		mov a, COUNT
+		mov b, #10
+		div ab           ; （无符号除法）用 a 除以 b，结果存到 a 中，余数存到 b 中
+		mov LED3, a     ; 十位数用 LED3 显示
+		mov LED4, b     ; 个位数用 LED4 显示
 
-    mov _P0, #0b10110000 ; 仅 ef 灭，显示 3
-	setb _P2_3           ; 给 D1 供电
-	lcall   _delay
-	clr _P2_3          ; 关掉 D1 电源
+		ret							
+	  
+_display:
+	mov a, LED3         ; 将 LED3 中的值 copy 到寄存器 a 中作为索引值
+    movc a, @a+dptr     ; A 和 DPTR 中的数加一起作为地址，把此地址中的数据（1 byte）取出来再存到 A 中
 
-	sjmp    _main_loop    ; 无限循环
+    mov _P0, a ; a 中的值，即为以 LED3 作为索引拿到的对应数码管引脚数据
+	setb _P2_2          ; 给 D3 供电
+	lcall   _delay
+	clr _P2_2           ; 关掉 D3 电源
+
+	mov a, LED4         ; 将 LED3 中的值 copy 到寄存器 a 中作为索引值
+    movc a, @a+dptr     ; A 和 DPTR 中的数加一起作为地址，把此地址中的数据（1 byte）取出来再存到 A 中
+    mov _P0, a
+	setb _P2_3          ; 给 D4 供电
+	lcall   _delay
+	clr _P2_3           ; 关掉 D4 电源
+
+	ret                 ; 跳转回调用方
+;------------------------------------------------------------
+; 常量数据区，当前数据量 12
+;------------------------------------------------------------
+_tab:
+	; 由高位到低位，8 个 bit 分别对应 P0.7 到 P0.0 八个引脚
+	; 这里 dp 与 gfedcba 八个数码管引脚（倒排序），分别接到 P0.0 ~ P0.7 上
+
+	; 从索引 0 到索引 9，存储的分别是数字 0-9 对应的 P0 引脚数据值
+	.db #0b11000000 ; dp 与 g 灭，显示 0
+	.db #0b11111001 ; 仅 bc 亮，显示 1
+	.db #0b10100100 ; 仅 cf 灭，显示 2
+	.db #0b10110000 ; 仅 ef 灭，显示 3
+	.db #0b10011001 ; 仅 ade 灭，显示 4
+	.db #0b10010010 ; 仅 be 灭，显示 5
+	.db #0b10000010 ; 仅 b 灭，显示 6
+	.db #0b11111000 ; defg 灭，显示 7
+	.db #0b10000000 ; 全部亮，显示 8
+	.db #0b10010000 ; 仅 e 灭，显示 9
+	.db #0b11111111 ; 全部灭，不显示
 
 ;------------------------------------------------------------
 ; function 'delay'
